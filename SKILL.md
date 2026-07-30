@@ -1,6 +1,6 @@
 ---
 name: analyze-3gpp-meeting-proposals
-description: Scope, retrieve, trace, and analyze 3GPP meeting proposals with auditable evidence. Use when a user asks about a 3GPP meeting, Agenda Item, Key Issue, Solution or Solution Variant, TDoc chain, company position, consensus, disagreement, adoption, or proposal evolution, including vague requests such as analyzing a whole meeting or an AI-related topic. Also use when producing a sourced comparison or handing evidence to generic DOCX/PPTX capabilities. Do not require or invoke a proposal-analysis MCP service.
+description: Resolve, scope, retrieve, trace, and analyze 3GPP meeting proposals across SA1-SA6, RAN1-RAN6, and CT1-CT6 with auditable evidence. Use when a user identifies a meeting by number, month, official URL, or local directory, or asks about an Agenda Item, Key Issue, Solution or Solution Variant, TDoc chain, company position, consensus, disagreement, adoption, or proposal evolution, including vague whole-meeting or AI-related requests. Also use when producing a sourced comparison or handing evidence to generic DOCX/PPTX capabilities. Do not require or invoke a proposal-analysis MCP service.
 ---
 
 # Analyze 3GPP Meeting Proposals
@@ -9,34 +9,48 @@ Keep reasoning with the host Agent. Use the bundled script only to accelerate me
 
 ## Work progressively
 
-1. Interpret the requested meeting, topic, company, time range, and desired decision.
-2. Run a cheap scope preview before committing to a large analysis:
+1. Interpret the requested working group, meeting number or month, topic, company, time range, and desired decision.
+2. Resolve a named or date-based meeting before retrieving meeting content:
+
+   ```text
+   python scripts/collect_3gpp_evidence.py resolve --meeting "SA5 May 2026"
+   ```
+
+   Accept `SA1`-`SA6`, `RAN1`-`RAN6`, and `CT1`-`CT6`. Prefer an exact meeting number or official URL when available. Treat `ambiguous` and `unresolved` as a hard stop for collection. Present the returned official candidates and ask only which exact meeting the user means.
+3. Run a cheap scope preview before committing to a large analysis:
 
    ```text
    python scripts/collect_3gpp_evidence.py preview --meeting "<meeting-or-url>" --query "<topic>" --output "<workdir>"
    ```
 
-3. Decide from the returned candidates, concentration, relationship coverage, and failures:
+4. Decide from the returned candidates, concentration, relationship coverage, and failures:
    - Clear and concentrated: continue without asking.
    - Clear but broad: collect the core decision chain first, give a landscape, then complete the evidence in batches.
    - Ambiguous but concentrated: ask only the highest-impact question.
    - Ambiguous and dispersed: offer 3-5 choices derived from the preview, never a generic fixed menu.
    - User does not know what to choose: summarize the observed landscape and recommend useful deep dives.
-4. For a broad or relationship-heavy request, collect baseline and approved documents first:
+5. When the user supplies one or more TDocs, seed the scope explicitly instead of downloading every topical match:
+
+   ```text
+   python scripts/collect_3gpp_evidence.py collect --meeting "<meeting-or-url>" --query "<topic>" --include-tdoc "R1-2601001" --output "<workdir>" --stage core
+   ```
+
+   Repeat `--include-tdoc` when needed. Collect those TDocs and their explicit valid relationship chain; record absent TDocs as missing.
+6. For a broad or relationship-heavy request without explicit TDocs, collect baseline and approved documents first:
 
    ```text
    python scripts/collect_3gpp_evidence.py collect --meeting "<meeting-or-url>" --query "<topic>" --output "<workdir>" --stage core
    ```
 
-5. Complete the same output directory when the input proposals are needed:
+7. Complete the same output directory when the input proposals are needed:
 
    ```text
    python scripts/collect_3gpp_evidence.py collect --meeting "<meeting-or-url>" --query "<topic>" --output "<workdir>" --stage complete
    ```
 
    For a small, concentrated scope, run `--stage complete` directly.
-6. Read `scope_preview.json`, `manifest.json`, `relationships.json`, `evidence.jsonl`, `document_index.jsonl`, `diffs.json`, and `coverage.json`. Inspect original proposals for every material conclusion.
-7. Analyze the baseline-to-approved differences first, then use input proposals to attribute positions and disagreements. Use the host's generic document or presentation skill when a DOCX/PPTX is requested; otherwise deliver sourced Markdown.
+8. Read `scope_preview.json`, `manifest.json`, `relationships.json`, `evidence.jsonl`, `document_index.jsonl`, `diffs.json`, and `coverage.json`. Inspect original proposals for every material conclusion.
+9. Analyze the baseline-to-approved differences first, then use input proposals to attribute positions and disagreements. Use the host's generic document or presentation skill when a DOCX/PPTX is requested; otherwise deliver sourced Markdown.
 
 Treat candidate count only as a cost signal. Never use a fixed document threshold as the decision rule. `--batch-size` controls execution only and never removes documents from the selected scope.
 
@@ -59,6 +73,9 @@ Read [references/evidence-rules.md](references/evidence-rules.md) before judging
 - Use `--no-cache` when persistence is inappropriate and `--refresh` when the remote body must be reacquired. Never clear the shared cache unless the user explicitly requests it.
 - Use generic PDF/document/presentation/spreadsheet capabilities for PDF, legacy `.doc`, images, malformed OOXML, or layout-sensitive evidence.
 - If Python is unavailable, follow the same workflow manually: inspect the meeting index and agenda, build a TDoc manifest, download only candidate proposals, trace explicit cross-references, and maintain a coverage ledger.
+- On Windows, use `scripts/run-collector.cmd` when Python is installed but not available through the current shell's `PATH` or PowerShell policy blocks direct `.ps1` execution. Add `--no-cache` when the host forbids writes to the user cache.
+- If official directory discovery is blocked, use a browser only to locate the exact public 3GPP meeting URL. Rerun `resolve`, `preview`, or `collect` with that URL; do not turn the fallback into a serial manual download loop.
+- Never bypass the collector's bounded concurrency by launching parallel collectors or downloading proposals one by one in the browser.
 - If the meeting, KI, Solution, company, or premise appears inconsistent, show the conflicting evidence and resolve the smallest consequential ambiguity before deep analysis.
 
 The script must not decide company viewpoints, consensus, technical merit, or final adoption.
