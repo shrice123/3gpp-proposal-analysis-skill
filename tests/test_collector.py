@@ -238,6 +238,239 @@ class LightweightProposalSkillTests(unittest.TestCase):
             processed = {item["tdoc"] for item in manifest["documents"] if item["state"].endswith("processed")}
             self.assertEqual({"S2-2608100", "S2-2608101"}, processed)
 
+    def test_all_sa_ran_ct_working_groups_are_discovered_from_parent_indexes(self) -> None:
+        fetcher = COLLECTOR.Fetcher()
+        for family in ("SA", "RAN", "CT"):
+            for number in range(1, 7):
+                group = f"{family}{number}"
+                parent = COLLECTOR.TSG_ROOTS[family]
+                expected = f"{parent}WG{number}_Representative/"
+                with self.subTest(group=group), mock.patch.object(
+                    COLLECTOR,
+                    "cached_links",
+                    return_value=[expected],
+                ):
+                    resolved, candidates = COLLECTOR.discover_group_root(
+                        fetcher,
+                        None,
+                        group,
+                        refresh=False,
+                    )
+                    self.assertEqual(expected, resolved)
+                    self.assertEqual([expected], candidates)
+
+    def test_meeting_descriptor_accepts_number_suffix_and_date_formats(self) -> None:
+        cases = {
+            "SA5#167": ("SA5", "167", "", None, None),
+            "RAN1#125-AH-e": ("RAN1", "125", "ah-e", None, None),
+            "CT3 2026-05": ("CT3", None, "", 2026, 5),
+            "SA5 May 2026": ("SA5", None, "", 2026, 5),
+            "RAN1 2026年5月": ("RAN1", None, "", 2026, 5),
+        }
+        for hint, expected in cases.items():
+            with self.subTest(hint=hint):
+                parsed = COLLECTOR.parse_meeting_descriptor(hint)
+                self.assertEqual(expected, (parsed["group"], parsed["number"], parsed["suffix"], parsed["year"], parsed["month"]))
+
+        explicit = COLLECTOR.resolve_meeting(
+            COLLECTOR.Fetcher(),
+            "https://www.3gpp.org/ftp/tsg_sa/WG5_TM/TSGS5_167",
+        )
+        self.assertEqual("resolved", explicit["status"])
+        self.assertEqual("explicit", explicit["confidence"])
+        self.assertTrue(explicit["selected_url"].endswith("/"))
+
+        invalid_group = COLLECTOR.resolve_meeting(COLLECTOR.Fetcher(), "SA7#100")
+        self.assertEqual("unresolved", invalid_group["status"])
+
+    def test_representative_group_numbers_resolve_without_static_group_map(self) -> None:
+        fetcher = COLLECTOR.Fetcher()
+        fixtures = {
+            "SA2#175-AH-e": (
+                COLLECTOR.TSG_ROOTS["SA"] + "WG2_Arch/",
+                "TSGS2_175-AH-e",
+            ),
+            "SA5#167": (
+                COLLECTOR.TSG_ROOTS["SA"] + "WG5_TM/",
+                "TSGS5_167",
+            ),
+            "RAN1#125": (
+                COLLECTOR.TSG_ROOTS["RAN"] + "WG1_RL1/",
+                "TSGR1_125",
+            ),
+            "CT3#147": (
+                COLLECTOR.TSG_ROOTS["CT"] + "WG3_interworking_ex-CN3/",
+                "TSGC3_147",
+            ),
+        }
+
+        def links(_fetcher, _cache, url, *, refresh):
+            del _fetcher, _cache, refresh
+            for root, meeting in fixtures.values():
+                if url == root:
+                    return [root + meeting]
+            family = next(key for key, root in COLLECTOR.TSG_ROOTS.items() if root == url)
+            roots = [root for root, _meeting in fixtures.values() if root.startswith(COLLECTOR.TSG_ROOTS[family])]
+            return sorted(set(roots))
+
+        with mock.patch.object(COLLECTOR, "cached_links", side_effect=links):
+            for hint, (root, meeting) in fixtures.items():
+                with self.subTest(hint=hint):
+                    resolved = COLLECTOR.resolve_meeting(fetcher, hint)
+                    self.assertEqual("resolved", resolved["status"])
+                    self.assertEqual(root + meeting + "/", resolved["selected_url"])
+
+    def test_date_resolution_uses_official_calendar_and_detects_ambiguity(self) -> None:
+        fetcher = COLLECTOR.Fetcher()
+        parent = COLLECTOR.TSG_ROOTS["CT"]
+        root = parent + "WG3_interworking_ex-CN3/"
+        calendar_html = """
+        <table>
+          <tr><td>C3-147</td><td>3GPPCT3#147</td><td>China</td><td>2026-05-18</td><td>2026-05-22</td></tr>
+        </table>
+        """
+
+        def links(_fetcher, _cache, url, *, refresh):
+            del _fetcher, _cache, refresh
+            if url == parent:
+                return [root]
+            if url == root:
+                return [root + "TSGC3_147", root + "TSGC3_147-bis"]
+            return []
+
+        with (
+            mock.patch.object(COLLECTOR, "cached_text", return_value=calendar_html),
+            mock.patch.object(COLLECTOR, "cached_links", side_effect=links),
+        ):
+            resolved = COLLECTOR.resolve_meeting(fetcher, "CT3 May 2026")
+        self.assertEqual("ambiguous", resolved["status"])
+        self.assertIsNone(resolved["resolved"])
+        self.assertEqual("2026-05-18", resolved["calendar_matches"][0]["start_date"])
+        self.assertEqual(2, len(resolved["candidates"]))
+
+        multiple_calendar_html = """
+        <table>
+          <tr><td>S5-167</td><td>3GPPSA5#167</td><td>2026-05-18</td><td>2026-05-22</td></tr>
+          <tr><td>S5-167-CH</td><td>3GPPSA5#167-CH SWG</td><td>2026-05-18</td><td>2026-05-22</td></tr>
+        </table>
+        """
+        sa_parent = COLLECTOR.TSG_ROOTS["SA"]
+        sa_root = sa_parent + "WG5_TM/"
+
+        def sa_links(_fetcher, _cache, url, *, refresh):
+            del _fetcher, _cache, refresh
+            return [sa_root] if url == sa_parent else [sa_root + "TSGS5_167"]
+
+        with (
+            mock.patch.object(COLLECTOR, "cached_text", return_value=multiple_calendar_html),
+            mock.patch.object(COLLECTOR, "cached_links", side_effect=sa_links),
+        ):
+            main_meeting = COLLECTOR.resolve_meeting(fetcher, "SA5 May 2026")
+        self.assertEqual("resolved", main_meeting["status"])
+        self.assertEqual("SA5#167-CH", main_meeting["excluded_calendar_matches"][0]["meeting"])
+
+        two_working_group_html = """
+        <table>
+          <tr><td>S5-167</td><td>3GPPSA5#167</td><td>2026-05-18</td><td>2026-05-22</td></tr>
+          <tr><td>S5-168</td><td>3GPPSA5#168</td><td>2026-05-25</td><td>2026-05-29</td></tr>
+        </table>
+        """
+        with mock.patch.object(COLLECTOR, "cached_text", return_value=two_working_group_html):
+            multiple = COLLECTOR.resolve_meeting(fetcher, "SA5 May 2026")
+        self.assertEqual("ambiguous", multiple["status"])
+        self.assertEqual({"SA5#167", "SA5#168"}, {item["name"] for item in multiple["candidates"]})
+
+    def test_explicit_tdoc_restricts_direct_scope_and_missing_tdoc_is_auditable(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            meeting = root / "meeting"
+            output = root / "output"
+            meeting.mkdir()
+            make_xlsx(
+                meeting / "agenda.xlsx",
+                [
+                    ["TDoc", "Title", "Source", "Status"],
+                    ["R1-2601000", "AI baseline", "Company A", "Approved"],
+                    ["R1-2601001", "AI alternative", "Company B", "Not Handled"],
+                ],
+            )
+            make_tdoc_zip(meeting / "R1-2601000.zip", "R1-2601000", ["AI baseline."])
+            make_tdoc_zip(meeting / "R1-2601001.zip", "R1-2601001", ["AI alternative."])
+            result = self.run_cli(
+                "collect",
+                "--meeting", str(meeting),
+                "--query", "AI",
+                "--include-tdoc", "R1-2601001",
+                "--include-tdoc", "R1-2601999",
+                "--output", str(output),
+                "--no-cache",
+                "--stage", "core",
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            preview = json.loads((output / "scope_preview.json").read_text(encoding="utf-8"))
+            self.assertEqual(["R1-2601001", "R1-2601999"], preview["included_tdocs"])
+            self.assertEqual(
+                {"R1-2601001", "R1-2601999"},
+                {item["tdoc"] for item in preview["candidates"]},
+            )
+            manifest = json.loads((output / "manifest.json").read_text(encoding="utf-8"))
+            states = {item["tdoc"]: item["state"] for item in manifest["documents"]}
+            self.assertTrue(states["R1-2601001"].endswith("processed"))
+            self.assertEqual("missing", states["R1-2601999"])
+            self.assertNotIn("R1-2601000", states)
+
+            invalid = self.run_cli(
+                "preview",
+                "--meeting", str(meeting),
+                "--query", "AI",
+                "--include-tdoc", "not-a-tdoc",
+                "--output", str(root / "invalid-output"),
+                "--no-cache",
+            )
+            self.assertEqual(2, invalid.returncode)
+            self.assertIn("--include-tdoc requires identifiers", invalid.stderr)
+
+    def test_ambiguous_resolution_blocks_collection_before_downloader(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            output = Path(temp) / "output"
+            args = COLLECTOR.argparse.Namespace(
+                output=str(output),
+                aliases=None,
+                no_cache=True,
+                cache_dir=None,
+                meeting=["SA5 May 2026"],
+                refresh=False,
+                include_tdoc=[],
+                query="AI",
+                company=[],
+                command="collect",
+                retries=0,
+                download="matched",
+                stage="complete",
+                max_concurrency=4,
+                parse_workers=2,
+                batch_size=8,
+            )
+            ambiguous = {
+                "input": "SA5 May 2026",
+                "status": "ambiguous",
+                "confidence": "candidate",
+                "kind": "name",
+                "resolved": None,
+                "selected_url": None,
+                "candidates": [{"name": "SA5#167"}, {"name": "SA5#167-CH"}],
+            }
+            with (
+                mock.patch.object(COLLECTOR, "resolve_meeting", return_value=ambiguous),
+                mock.patch.object(COLLECTOR, "StreamingDownloader") as downloader,
+            ):
+                result = COLLECTOR.collect(args)
+            self.assertEqual(2, result)
+            downloader.assert_not_called()
+            coverage = json.loads((output / "coverage.json").read_text(encoding="utf-8"))
+            self.assertEqual("partial", coverage["completeness"])
+            self.assertEqual(0, coverage["downloaded_archives"])
+
 
 if __name__ == "__main__":
     unittest.main()

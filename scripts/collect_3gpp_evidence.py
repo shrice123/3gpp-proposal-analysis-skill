@@ -44,9 +44,9 @@ from transfer_runtime import (  # noqa: E402
     default_cache_root,
 )
 
-VERSION = "2.0.0"
-PARSER_VERSION = "2.0"
-USER_AGENT = "Mozilla/5.0 (compatible; 3GPP-evidence-collector/2.0)"
+VERSION = "2.1.0"
+PARSER_VERSION = "2.1"
+USER_AGENT = "Mozilla/5.0 (compatible; 3GPP-evidence-collector/2.1)"
 TDoc_RE = re.compile(r"\b([A-Z]\d[-–]?\d{7})\b", re.I)
 KI_RE = re.compile(r"\bKI\s*#?\s*(\d+(?:\.\d+)*)\b", re.I)
 SV_RE = re.compile(r"\b(?:Solution\s+Variant|SV)\s*#?\s*(\d+(?:\.\d+)*)\b", re.I)
@@ -62,14 +62,37 @@ TOPIC_ALIASES = {
     "ai": ["artificial intelligence", "machine learning", "inference", "training", "agent"],
     "ml": ["machine learning", "artificial intelligence"],
 }
-GROUP_ROOTS = {
-    "SA2": "https://www.3gpp.org/ftp/tsg_sa/WG2_Arch/",
-    "SA3": "https://www.3gpp.org/ftp/tsg_sa/WG3_Security/",
-    "SA5": "https://www.3gpp.org/ftp/tsg_sa/WG5_TM/",
-    "RAN2": "https://www.3gpp.org/ftp/tsg_ran/WG2_RL2/",
-    "RAN3": "https://www.3gpp.org/ftp/tsg_ran/WG3_Iu/",
-    "CT1": "https://www.3gpp.org/ftp/tsg_ct/WG1_mm-cc-sm/",
-    "CT4": "https://www.3gpp.org/ftp/tsg_ct/WG4_protocollars_ex-CN4/",
+TSG_ROOTS = {
+    "SA": "https://www.3gpp.org/ftp/tsg_sa/",
+    "RAN": "https://www.3gpp.org/ftp/tsg_ran/",
+    "CT": "https://www.3gpp.org/ftp/tsg_ct/",
+}
+GROUP_RE = re.compile(r"\b(SA|RAN|CT)\s*[-_ ]?\s*([1-6])\b", re.I)
+MONTHS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
 }
 
 
@@ -276,9 +299,18 @@ def cached_metadata_bytes(
         return raw
 
 
-def list_links(fetcher: Fetcher, url: str) -> list[str]:
+def decode_text(raw: bytes) -> str:
+    for encoding in ("utf-8-sig", "utf-8", "cp1252"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def links_from_text(text: str, url: str) -> list[str]:
     parser = LinkParser()
-    parser.feed(fetcher.text(url, urllib.parse.urljoin(url, "./")))
+    parser.feed(text)
     result: list[str] = []
     for href in parser.links:
         if href.startswith(("#", "?", "mailto:")):
@@ -289,50 +321,384 @@ def list_links(fetcher: Fetcher, url: str) -> list[str]:
     return list(dict.fromkeys(result))
 
 
+def list_links(fetcher: Fetcher, url: str) -> list[str]:
+    return links_from_text(fetcher.text(url, urllib.parse.urljoin(url, "./")), url)
+
+
+def cached_text(
+    fetcher: Fetcher,
+    cache: CacheManager | None,
+    url: str,
+    *,
+    refresh: bool,
+) -> str:
+    if cache is None:
+        return fetcher.text(url, urllib.parse.urljoin(url, "./"))
+    return decode_text(
+        cached_metadata_bytes(
+            fetcher,
+            cache,
+            url,
+            urllib.parse.urljoin(url, "./"),
+            refresh=refresh,
+        )
+    )
+
+
+def cached_links(
+    fetcher: Fetcher,
+    cache: CacheManager | None,
+    url: str,
+    *,
+    refresh: bool,
+) -> list[str]:
+    return links_from_text(cached_text(fetcher, cache, url, refresh=refresh), url)
+
+
+def group_short_code(group: str) -> str:
+    if group.startswith("SA"):
+        return f"S{group[2:]}"
+    if group.startswith("RAN"):
+        return f"R{group[3:]}"
+    return f"C{group[2:]}"
+
+
+def parse_month_hint(hint: str) -> tuple[int | None, int | None]:
+    chinese = re.search(r"\b(20\d{2})\s*年\s*(1[0-2]|0?[1-9])\s*月", hint)
+    if chinese:
+        return int(chinese.group(1)), int(chinese.group(2))
+    numeric = re.search(r"\b(20\d{2})[-/.](1[0-2]|0?[1-9])\b", hint)
+    if numeric:
+        return int(numeric.group(1)), int(numeric.group(2))
+    english = re.search(
+        r"\b(" + "|".join(sorted(MONTHS, key=len, reverse=True)) + r")\.?\s+(20\d{2})\b",
+        hint,
+        re.I,
+    )
+    if english:
+        return int(english.group(2)), MONTHS[english.group(1).casefold()]
+    english_reverse = re.search(
+        r"\b(20\d{2})\s+(" + "|".join(sorted(MONTHS, key=len, reverse=True)) + r")\.?\b",
+        hint,
+        re.I,
+    )
+    if english_reverse:
+        return int(english_reverse.group(1)), MONTHS[english_reverse.group(2).casefold()]
+    return None, None
+
+
+def parse_meeting_descriptor(hint: str) -> dict[str, Any]:
+    normalized = " ".join(hint.replace("_", "-").split())
+    group_match = GROUP_RE.search(normalized)
+    group = f"{group_match.group(1).upper()}{group_match.group(2)}" if group_match else None
+    number = None
+    suffix = ""
+    if group_match:
+        remainder = normalized[group_match.end() :]
+        number_match = re.match(
+            r"\s*(?:#|meeting\s*#?|会议\s*#?)?\s*(\d{2,3})(?!\d)(?:[-_ ]?([A-Za-z][A-Za-z0-9-]*))?",
+            remainder,
+            re.I,
+        )
+        if number_match:
+            number = number_match.group(1)
+            suffix = (number_match.group(2) or "").strip("-").casefold()
+    year, month = parse_month_hint(normalized)
+    return {
+        "group": group,
+        "tsg": re.match(r"SA|RAN|CT", group).group(0) if group else None,
+        "number": number,
+        "suffix": suffix,
+        "year": year,
+        "month": month,
+        "normalized": normalized,
+    }
+
+
 def parse_meeting_hint(hint: str) -> tuple[str | None, str | None, str]:
-    normalized = re.sub(r"\s+", "", hint).replace("_", "-")
-    match = re.search(r"\b(SA\d|RAN\d|CT\d)#?(\d+)([A-Za-z0-9-]*)", normalized, re.I)
+    descriptor = parse_meeting_descriptor(hint)
+    return descriptor["group"], descriptor["number"], descriptor["suffix"]
+
+
+def discover_group_root(
+    fetcher: Fetcher,
+    cache: CacheManager | None,
+    group: str,
+    *,
+    refresh: bool,
+) -> tuple[str | None, list[str]]:
+    match = re.fullmatch(r"(SA|RAN|CT)([1-6])", group)
     if not match:
-        return None, None, normalized.casefold()
-    return match.group(1).upper(), match.group(2), match.group(3).strip("-").casefold()
+        return None, []
+    parent = TSG_ROOTS[match.group(1)]
+    directory_pattern = re.compile(rf"^WG{match.group(2)}(?:_|$)", re.I)
+    roots = []
+    for link in cached_links(fetcher, cache, parent, refresh=refresh):
+        leaf = urllib.parse.unquote(urllib.parse.urlparse(link).path.rstrip("/").split("/")[-1])
+        if directory_pattern.match(leaf):
+            roots.append(link.rstrip("/") + "/")
+    roots = sorted(set(roots))
+    return (roots[0] if len(roots) == 1 else None), roots
 
 
-def resolve_meeting(fetcher: Fetcher, hint: str) -> dict[str, Any]:
+def calendar_matches(
+    fetcher: Fetcher,
+    cache: CacheManager | None,
+    group: str,
+    year: int,
+    month: int,
+    *,
+    refresh: bool,
+) -> tuple[str, list[dict[str, Any]]]:
+    short = group_short_code(group)
+    calendar_url = f"https://www.3gpp.org/dynareport/Meetings-{short}.htm"
+    parser = TableParser()
+    parser.feed(cached_text(fetcher, cache, calendar_url, refresh=refresh))
+    result: list[dict[str, Any]] = []
+    code_re = re.compile(rf"\b{re.escape(short)}[-\s]?(\d+)(?:[-\s]?([A-Za-z][A-Za-z0-9-]*))?\b", re.I)
+    date_re = re.compile(r"\b(20\d{2})[-\u2010-\u2015](\d{2})[-\u2010-\u2015](\d{2})\b")
+    for row in parser.rows:
+        text = " ".join(row)
+        code = code_re.search(text)
+        dates = date_re.findall(text)
+        if not code or not dates:
+            continue
+        start_year, start_month, start_day = (int(value) for value in dates[0])
+        if (start_year, start_month) != (year, month):
+            continue
+        result.append(
+            {
+                "meeting": f"{group}#{code.group(1)}" + (f"-{code.group(2)}" if code.group(2) else ""),
+                "number": code.group(1),
+                "suffix": (code.group(2) or "").casefold(),
+                "start_date": f"{start_year:04d}-{start_month:02d}-{start_day:02d}",
+                "end_date": "-".join(dates[1]) if len(dates) > 1 else None,
+                "meeting_kind": "subgroup" if re.search(r"\b(?:AHG|SWG)\b", text, re.I) else "working_group",
+                "source": calendar_url,
+            }
+        )
+    unique = {(item["number"], item["suffix"], item["start_date"]): item for item in result}
+    return calendar_url, sorted(unique.values(), key=lambda item: (int(item["number"]), item["suffix"]))
+
+
+def meeting_directory_candidates(
+    links: list[str],
+    group: str,
+    numbers: set[str],
+    suffix: str,
+) -> list[dict[str, Any]]:
+    short = group_short_code(group).casefold()
+    group_token = group.casefold()
+    candidates = []
+    for link in links:
+        name = urllib.parse.unquote(urllib.parse.urlparse(link).path.rstrip("/").split("/")[-1])
+        folded = name.casefold()
+        compact = re.sub(r"[^a-z0-9]", "", folded)
+        matched_number = next(
+            (number for number in numbers if re.search(rf"(?<!\d){re.escape(number)}(?!\d)", folded)),
+            None,
+        )
+        if not matched_number:
+            continue
+        if short not in compact and group_token not in compact:
+            continue
+        score = 5
+        matched_fields = ["group", "meeting_number"]
+        if suffix:
+            suffix_tokens = [token for token in re.split(r"[-_\s]+", suffix) if token]
+            if not all(token.casefold() in folded for token in suffix_tokens):
+                continue
+            score += 3
+            matched_fields.append("suffix")
+        candidates.append(
+            {
+                "name": name,
+                "url": link.rstrip("/") + "/",
+                "score": score,
+                "matched_fields": matched_fields,
+                "number": matched_number,
+            }
+        )
+    return sorted(candidates, key=lambda item: (-item["score"], item["name"].casefold()))
+
+
+def resolve_meeting(
+    fetcher: Fetcher,
+    hint: str,
+    cache: CacheManager | None = None,
+    *,
+    refresh: bool = False,
+) -> dict[str, Any]:
     parsed = urllib.parse.urlparse(hint)
     if parsed.scheme in ("http", "https"):
-        return {"input": hint, "resolved": hint.rstrip("/") + "/", "kind": "url", "confidence": "explicit"}
+        resolved = hint.rstrip("/") + "/"
+        return {
+            "input": hint,
+            "normalized_group": None,
+            "tsg": None,
+            "meeting_hint": None,
+            "date_hint": None,
+            "status": "resolved",
+            "selected_url": resolved,
+            "resolved": resolved,
+            "kind": "url",
+            "confidence": "explicit",
+            "candidates": [],
+        }
     local = Path(hint)
     if local.exists():
-        return {"input": hint, "resolved": str(local.resolve()), "kind": "local", "confidence": "explicit"}
-    group, number, suffix = parse_meeting_hint(hint)
-    root = GROUP_ROOTS.get(group or "")
-    if not root or not number:
-        return {"input": hint, "resolved": None, "kind": "name", "confidence": "unresolved", "warning": "Supply a meeting URL or local directory."}
-    candidates = []
-    try:
-        for link in list_links(fetcher, root):
-            name = urllib.parse.unquote(urllib.parse.urlparse(link).path.rstrip("/").split("/")[-1]).casefold()
-            if number not in name:
-                continue
-            score = 2
-            if group and group.replace("SA", "TSGS").replace("RAN", "TSGR").replace("CT", "TSGC").casefold() in name:
-                score += 3
-            if suffix and all(token in name for token in re.split(r"[-_]", suffix) if token):
-                score += 3
-            candidates.append((score, link, name))
-    except CollectorError as exc:
-        return {"input": hint, "resolved": None, "kind": "name", "confidence": "unresolved", "warning": str(exc)}
-    candidates.sort(key=lambda item: (-item[0], item[2]))
-    if not candidates:
-        return {"input": hint, "resolved": None, "kind": "name", "confidence": "unresolved", "warning": f"No meeting directory matched under {root}"}
-    best = candidates[0]
-    tied = [item[1] for item in candidates if item[0] == best[0]]
-    return {
+        resolved = str(local.resolve())
+        return {
+            "input": hint,
+            "normalized_group": None,
+            "tsg": None,
+            "meeting_hint": None,
+            "date_hint": None,
+            "status": "resolved",
+            "selected_url": resolved,
+            "resolved": resolved,
+            "kind": "local",
+            "confidence": "explicit",
+            "candidates": [],
+        }
+    descriptor = parse_meeting_descriptor(hint)
+    group = descriptor["group"]
+    number = descriptor["number"]
+    suffix = descriptor["suffix"]
+    year = descriptor["year"]
+    month = descriptor["month"]
+    base = {
         "input": hint,
-        "resolved": best[1].rstrip("/") + "/",
+        "normalized_group": group,
+        "tsg": descriptor["tsg"],
+        "meeting_hint": f"{group}#{number}" + (f"-{suffix}" if suffix else "") if group and number else None,
+        "date_hint": f"{year:04d}-{month:02d}" if year and month else None,
+        "selected_url": None,
+        "resolved": None,
+        "kind": "name",
+        "candidates": [],
+    }
+    if not group:
+        return {
+            **base,
+            "status": "unresolved",
+            "confidence": "unresolved",
+            "warning": "Include an SA1-SA6, RAN1-RAN6, or CT1-CT6 working-group code, or supply an official URL or local directory.",
+        }
+    calendar_rows: list[dict[str, Any]] = []
+    if year and month:
+        try:
+            calendar_url, all_calendar_rows = calendar_matches(fetcher, cache, group, year, month, refresh=refresh)
+        except CollectorError as exc:
+            return {**base, "status": "unresolved", "confidence": "unresolved", "warning": str(exc)}
+        calendar_rows = [item for item in all_calendar_rows if item["meeting_kind"] == "working_group"]
+        base["excluded_calendar_matches"] = [
+            item for item in all_calendar_rows if item["meeting_kind"] != "working_group"
+        ]
+        if number and not any(item["number"] == number for item in calendar_rows):
+            return {
+                **base,
+                "status": "ambiguous",
+                "confidence": "candidate",
+                "calendar_source": calendar_url,
+                "calendar_matches": calendar_rows,
+                "warning": f"{group}#{number} is not listed in the official {year:04d}-{month:02d} meeting calendar.",
+            }
+        if not number:
+            if not calendar_rows:
+                return {
+                    **base,
+                    "status": "unresolved",
+                    "confidence": "unresolved",
+                    "calendar_source": calendar_url,
+                    "warning": f"No {group} meeting is listed in the official calendar for {year:04d}-{month:02d}.",
+                }
+            if len(calendar_rows) > 1:
+                return {
+                    **base,
+                    "status": "ambiguous",
+                    "confidence": "candidate",
+                    "calendar_source": calendar_url,
+                    "calendar_matches": calendar_rows,
+                    "candidates": [
+                        {
+                            "name": item["meeting"],
+                            "url": None,
+                            "score": 5,
+                            "matched_fields": ["group", "official_calendar_date"],
+                            "number": item["number"],
+                            "start_date": item["start_date"],
+                            "end_date": item["end_date"],
+                        }
+                        for item in calendar_rows[:10]
+                    ],
+                    "warning": "Multiple official meetings match this working group and month; choose an exact meeting number or URL.",
+                }
+            numbers = {item["number"] for item in calendar_rows}
+        else:
+            numbers = {number}
+    elif number:
+        numbers = {number}
+    else:
+        return {
+            **base,
+            "status": "unresolved",
+            "confidence": "unresolved",
+            "warning": "Include a meeting number or a year and month, or supply an official URL or local directory.",
+        }
+    try:
+        root, roots = discover_group_root(fetcher, cache, group, refresh=refresh)
+    except CollectorError as exc:
+        return {**base, "status": "unresolved", "confidence": "unresolved", "warning": str(exc)}
+    if not root:
+        return {
+            **base,
+            "status": "ambiguous" if roots else "unresolved",
+            "confidence": "candidate" if roots else "unresolved",
+            "candidates": [{"name": source_path(item).rstrip("/").split("/")[-1], "url": item, "score": 0, "matched_fields": ["group"]} for item in roots],
+            "warning": f"Expected one official directory for {group}; found {len(roots)}.",
+        }
+    try:
+        candidates = meeting_directory_candidates(
+            cached_links(fetcher, cache, root, refresh=refresh),
+            group,
+            numbers,
+            suffix,
+        )
+    except CollectorError as exc:
+        return {**base, "status": "unresolved", "confidence": "unresolved", "group_root": root, "warning": str(exc)}
+    if not candidates:
+        return {
+            **base,
+            "status": "unresolved",
+            "confidence": "unresolved",
+            "group_root": root,
+            "calendar_matches": calendar_rows,
+            "warning": f"No meeting directory matched under {root}",
+        }
+    best_score = candidates[0]["score"]
+    tied = [item for item in candidates if item["score"] == best_score]
+    if len(tied) != 1:
+        return {
+            **base,
+            "status": "ambiguous",
+            "confidence": "candidate",
+            "group_root": root,
+            "calendar_matches": calendar_rows,
+            "candidates": tied[:10],
+            "warning": "Multiple official meeting directories match; choose one exact meeting or URL.",
+        }
+    selected = tied[0]["url"]
+    return {
+        **base,
+        "status": "resolved",
+        "selected_url": selected,
+        "resolved": selected,
         "kind": "url",
-        "confidence": "high" if len(tied) == 1 else "candidate",
-        "alternatives": tied[1:6],
+        "confidence": "high",
+        "group_root": root,
+        "calendar_matches": calendar_rows,
+        "candidates": tied,
     }
 
 
@@ -1100,9 +1466,16 @@ def collect(args: argparse.Namespace) -> int:
     output.mkdir(parents=True, exist_ok=True)
     fetcher = Fetcher()
     aliases = load_aliases(args.aliases)
-    meetings = [resolve_meeting(fetcher, hint) for hint in args.meeting]
-    cache_enabled = not args.no_cache and (bool(args.cache_dir) or any(meeting.get("kind") == "url" for meeting in meetings))
+    cache_enabled = not args.no_cache and (
+        bool(args.cache_dir)
+        or any(
+            urllib.parse.urlparse(hint).scheme in ("http", "https") or not Path(hint).exists()
+            for hint in args.meeting
+        )
+    )
     cache = CacheManager(Path(args.cache_dir) if args.cache_dir else None, enabled=cache_enabled)
+    meetings = [resolve_meeting(fetcher, hint, cache, refresh=args.refresh) for hint in args.meeting]
+    resolution_blocked = any(meeting.get("status") != "resolved" for meeting in meetings)
     all_files: list[str] = []
     for meeting in meetings:
         if meeting.get("kind") == "url" and meeting.get("resolved"):
@@ -1151,12 +1524,25 @@ def collect(args: argparse.Namespace) -> int:
     records = list(by_id.values())
     record_by_id = {record["tdoc"]: record for record in records}
     terms = query_terms(args.query)
+    explicit_ids = {normalize_tdoc(value) for value in args.include_tdoc}
+    invalid_explicit_ids = sorted(value for value in explicit_ids if not re.fullmatch(r"[A-Z]\d-\d{7}", value))
+    if invalid_explicit_ids:
+        raise CollectorError(
+            "--include-tdoc requires identifiers such as S5-2600123, R1-2600123, or C3-2600123: "
+            + ", ".join(invalid_explicit_ids)
+        )
     required_ids = identifiers(args.query)
+    if explicit_ids:
+        required_ids["tdocs"] = sorted(set(required_ids["tdocs"]) | explicit_ids)
     scored = [(match_score(record, terms, args.company, aliases, required_ids), record) for record in records]
-    matched = [record for score, record in scored if score > 0]
+    matched = (
+        [record for record in records if record["tdoc"] in explicit_ids]
+        if explicit_ids
+        else [record for score, record in scored if score > 0]
+    )
     if not matched and not terms and records:
         matched = records
-    matched_ids = {record["tdoc"] for record in matched}
+    matched_ids = {record["tdoc"] for record in matched} | explicit_ids
 
     file_by_tdoc: dict[str, list[str]] = {}
     for source in all_files:
@@ -1188,13 +1574,16 @@ def collect(args: argparse.Namespace) -> int:
     for record in records:
         if record["tdoc"] in related_ids:
             scoped = dict(record)
-            scoped["scope_basis"] = "direct_query" if record["tdoc"] in matched_ids else "explicit_relationship"
+            if record["tdoc"] in explicit_ids:
+                scoped["scope_basis"] = "explicit_tdoc"
+            else:
+                scoped["scope_basis"] = "direct_query" if record["tdoc"] in matched_ids else "explicit_relationship"
             scoped_records.append(scoped)
             scoped_record_ids.add(record["tdoc"])
     for tdoc in sorted(related_ids - scoped_record_ids):
         scoped_records.append({
             "tdoc": tdoc,
-            "scope_basis": "explicit_relationship",
+            "scope_basis": "explicit_tdoc" if tdoc in explicit_ids else "explicit_relationship",
             "metadata_missing": True,
             "title": "",
             "source_company": "",
@@ -1207,12 +1596,15 @@ def collect(args: argparse.Namespace) -> int:
         "status": dict(Counter(record.get("status") or "(blank)" for record in scoped_records)),
     }
     warnings = []
-    if any(meeting.get("confidence") != "explicit" and meeting.get("alternatives") for meeting in meetings):
-        warnings.append("One or more meeting names have alternative directory matches.")
+    if resolution_blocked:
+        warnings.append("Meeting resolution is ambiguous or unresolved; proposal-body collection is blocked.")
     if records and len(matched) == len(records) and args.query:
         warnings.append("The query did not concentrate the agenda records; inspect topic aliases and identifiers.")
     if not records:
         warnings.append("No structured agenda records were parsed; scope may be incomplete.")
+    missing_explicit_ids = explicit_ids - set(record_by_id)
+    if missing_explicit_ids:
+        warnings.append("Some explicitly included TDocs were not present in parsed meeting metadata.")
     if fetcher.failures:
         warnings.append("Some sources could not be accessed; do not claim complete coverage.")
 
@@ -1222,6 +1614,7 @@ def collect(args: argparse.Namespace) -> int:
         "generated_at": utc_now(),
         "query": args.query,
         "companies": args.company,
+        "included_tdocs": sorted(explicit_ids),
         "meetings": meetings,
         "discovered_file_count": len(all_files),
         "agenda_record_count": len(records),
@@ -1262,7 +1655,7 @@ def collect(args: argparse.Namespace) -> int:
         "stage_timings": {"total_seconds": time.monotonic() - run_started},
     }
     write_json(output / "scope_preview.json", preview)
-    if args.command == "preview":
+    if args.command == "preview" or resolution_blocked:
         write_json(output / "manifest.json", {"schema_version": 2, "collector_version": VERSION, "metadata": metadata_manifest, "documents": []})
         write_json(output / "relationships.json", {"schema_version": 2, "relationships": unique_relationships(relationships)})
         write_jsonl(output / "evidence.jsonl", [])
@@ -1270,12 +1663,13 @@ def collect(args: argparse.Namespace) -> int:
         write_json(output / "diffs.json", {"schema_version": 2, "diffs": []})
         write_json(output / "coverage.json", base_coverage)
         print(json.dumps({"output": str(output), "candidates": len(scoped_records), "failures": len(fetcher.failures)}, ensure_ascii=False))
-        return 0 if meetings and any(meeting.get("resolved") for meeting in meetings) else 2
+        return 0 if not resolution_blocked else 2
 
     signature_value = {
         "meetings": [meeting.get("resolved") for meeting in meetings],
         "query": args.query,
         "companies": args.company,
+        "included_tdocs": sorted(explicit_ids),
     }
     run_signature = hashlib.sha256(json.dumps(signature_value, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
     prior_manifest = read_json(output / "manifest.json")
@@ -1310,7 +1704,10 @@ def collect(args: argparse.Namespace) -> int:
         for endpoint in (relationship.get("from"), relationship.get("to"))
         if endpoint
     )
-    priority_by_id = {tdoc: task_priority(tdoc, record_by_id, matched_ids) for tdoc in related_ids}
+    priority_by_id = {
+        tdoc: 0 if tdoc in explicit_ids else task_priority(tdoc, record_by_id, matched_ids)
+        for tdoc in related_ids
+    }
     core_ids = {tdoc for tdoc, priority in priority_by_id.items() if priority == 0}
     if not core_ids:
         core_ids = set(matched_ids)
@@ -1323,6 +1720,7 @@ def collect(args: argparse.Namespace) -> int:
         "run_signature": run_signature,
         "query": args.query,
         "companies": args.company,
+        "included_tdocs": sorted(explicit_ids),
         "meetings": meetings,
         "stage": args.stage,
         "metadata": metadata_manifest,
@@ -1548,14 +1946,44 @@ def collect(args: argparse.Namespace) -> int:
     return 0 if meetings and any(meeting.get("resolved") for meeting in meetings) else 2
 
 
+def resolve_command(args: argparse.Namespace) -> int:
+    fetcher = Fetcher()
+    cache = CacheManager(Path(args.cache_dir) if args.cache_dir else None, enabled=not args.no_cache)
+    meetings = [
+        resolve_meeting(fetcher, hint, cache, refresh=args.refresh)
+        for hint in args.meeting
+    ]
+    payload = {
+        "schema_version": 1,
+        "collector_version": VERSION,
+        "generated_at": utc_now(),
+        "meetings": meetings,
+        "checked_requests": fetcher.checked,
+        "metadata_body_bytes": fetcher.body_bytes,
+        "metadata_cache_hits": len(fetcher.cache_hits),
+        "failures": fetcher.failures,
+    }
+    if args.output:
+        write_json(Path(args.output).resolve(), payload)
+    print(json.dumps(payload, ensure_ascii=False))
+    return 0 if all(meeting.get("status") == "resolved" for meeting in meetings) else 2
+
+
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description=__doc__)
     result.add_argument("--version", action="version", version=VERSION)
     subparsers = result.add_subparsers(dest="command", required=True)
+    resolver = subparsers.add_parser("resolve")
+    resolver.add_argument("--meeting", action="append", required=True, help="Meeting number/date hint, official URL, or local directory; repeatable.")
+    resolver.add_argument("--output", help="Optional JSON output file.")
+    resolver.add_argument("--cache-dir")
+    resolver.add_argument("--no-cache", action="store_true")
+    resolver.add_argument("--refresh", action="store_true")
     for command in ("preview", "collect"):
         child = subparsers.add_parser(command)
-        child.add_argument("--meeting", action="append", required=True, help="Meeting name, official index URL, or local fixture directory; repeatable.")
+        child.add_argument("--meeting", action="append", required=True, help="Meeting number/date hint, official URL, or local fixture directory; repeatable.")
         child.add_argument("--query", required=True, help="Natural-language topic, KI, Solution, Solution Variant, or TDoc.")
+        child.add_argument("--include-tdoc", action="append", default=[], help="Explicit TDoc seed; repeatable.")
         child.add_argument("--company", action="append", default=[], help="Company filter; repeatable.")
         child.add_argument("--aliases", help="UTF-8 JSON mapping canonical company names to aliases.")
         child.add_argument("--output", required=True)
@@ -1592,6 +2020,8 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             print(json.dumps({"cleared": cache.clear()}, ensure_ascii=False))
             return 0
+        if args.command == "resolve":
+            return resolve_command(args)
         if args.command in ("preview", "collect") and args.retries < 0:
             raise CollectorError("--retries cannot be negative")
         if args.command == "collect":

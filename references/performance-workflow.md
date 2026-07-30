@@ -12,11 +12,16 @@ The scheduler lowers its active window after throttling, server errors, timeouts
 
 ## Stages
 
+- `resolve`: read only the official TSG parent index, working-group directory index, and date calendar needed to identify a meeting. It never downloads proposal bodies.
 - `--stage core`: collect baseline and approved documents identified in meeting metadata. If neither role is identifiable, collect the direct query matches.
 - `--stage complete`: reuse a matching schema-v2 manifest and add the remaining direct and explicit-relation documents.
 - Reuse the same output directory and exact meeting/query/company inputs when continuing from core to complete.
 
 The stage changes execution order, not the interpreted scope.
+
+Use repeatable `--include-tdoc` arguments to restrict the direct scope to known TDocs. Explicit valid relationship endpoints can still expand the scope. Missing requested TDocs remain visible in the manifest and coverage ledger.
+
+An explicit seed cannot reveal a reverse relationship that exists only in an unselected document and is absent from meeting metadata. Report that as a possible omission instead of claiming that the body-derived relationship chain is exhaustive.
 
 ## Cache
 
@@ -33,7 +38,7 @@ collect ... --refresh
 Use `--cache-dir` to share a deliberate cache location across hosts. Use `--no-cache` when persistent public files are not acceptable. Use `--refresh` to bypass cached bodies; do not use it routinely.
 
 The collector validates cache entries with ETag or Last-Modified, resumes partial files with Range/If-Range, validates ZIPs, and atomically replaces completed payloads. A parser-version change reuses the raw file but regenerates deterministic parsed data.
-Both `preview` and `collect` conditionally cache public meeting metadata. Repeated previews can therefore receive a 304 with zero metadata body bytes; inspect `metadata_cache_hits` and `metadata_body_bytes` in `coverage.json`.
+`resolve`, `preview`, and `collect` conditionally cache public working-group indexes, official meeting calendars, and meeting metadata. Repeated operations can therefore receive a 304 with zero metadata body bytes; inspect `metadata_cache_hits` and `metadata_body_bytes`.
 
 Only execute `cache clear --yes` after an explicit user request. Report the removed location and size.
 

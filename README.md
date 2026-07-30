@@ -5,6 +5,9 @@
 用户只需要用自然语言提出问题，例如：
 
 - “帮我分析 SA2#175-AH-e 会议 KI#18、Solution Variant#18.7 中不同公司的观点。”
+- “SA5 2026 年 5 月会议中，哪些提案涉及自治网络意图？”
+- “梳理 RAN1#125 中某个波形方案的公司分歧。”
+- “比较 CT3#147 中有关互通流程的几份指定 TDoc。”
 - “分析这次会议中与 AI 相关的提案。”
 - “梳理某个 Solution 从 baseline 到 approved 版本的变化。”
 - “这个课题有哪些争议？哪些提案被合并或采纳了？”
@@ -105,7 +108,9 @@ hermes skills list
 
 > 分析 AI 相关课题。
 
-Skill 会指导 Agent 先获取真实会议范围预览，再根据实际 Agenda、KI、公司分布、争议 Solution 或提案关系给出可选分析方向，而不是盲目下载整场会议。
+> 分析 RAN1 2026 年 5 月会议中的 AI/ML 提案。
+
+Skill 会指导 Agent 先通过官方会议日历和 SA、RAN、CT 工作组目录解析会议，再获取真实会议范围预览。日期对应多个会议或目录存在多个变体时会先返回候选，不会猜测会议或盲目下载整场会议。
 
 ### 2. 单独运行证据采集脚本
 
@@ -117,6 +122,12 @@ Skill 会指导 Agent 先获取真实会议范围预览，再根据实际 Agenda
 - 需要调试提案范围、关系链、缓存或下载情况。
 
 推荐 Python 3.10 或更高版本。脚本只使用 Python 标准库。
+
+先解析会议名称或月份，不下载提案正文：
+
+```bash
+python scripts/collect_3gpp_evidence.py resolve --meeting "SA5 May 2026"
+```
 
 先预览范围：
 
@@ -138,6 +149,20 @@ python scripts/collect_3gpp_evidence.py collect --meeting "SA2#175-AH-e" --query
 
 `core` 和 `complete` 只改变执行顺序，不改变 Agent 对完整分析范围的判断。
 
+如果已经知道重点 TDoc，可重复使用 `--include-tdoc`，只以这些文档及其显式有效关系链为直接范围：
+
+```bash
+python scripts/collect_3gpp_evidence.py collect --meeting "RAN1#125" --query "AI/ML for air interface" --include-tdoc "R1-2601001" --stage core --output output/ran1
+```
+
+Windows 中当前终端找不到 Python 命令或 PowerShell 执行策略阻止直接运行 `.ps1` 时，可使用：
+
+```bat
+scripts\run-collector.cmd resolve --meeting "CT3 2026年5月"
+```
+
+在禁止写入用户缓存的受限环境中追加 `--no-cache`。
+
 ## 三、项目各部分是做什么的
 
 ```text
@@ -151,6 +176,8 @@ python scripts/collect_3gpp_evidence.py collect --meeting "SA2#175-AH-e" --query
 │   └── performance-workflow.md
 ├── scripts/
 │   ├── collect_3gpp_evidence.py
+│   ├── run-collector.cmd
+│   ├── run-collector.ps1
 │   └── transfer_runtime.py
 ├── tests/
 ├── .github/workflows/
@@ -183,7 +210,11 @@ python scripts/collect_3gpp_evidence.py collect --meeting "SA2#175-AH-e" --query
 这是用户可以直接调用的命令行入口，负责协调完整的机械化证据采集流程，包括：
 
 - 解析会议名称、会议 URL 或本地测试目录；
+- 从官方 SA、RAN、CT 父目录发现 SA1～SA6、RAN1～RAN6、CT1～CT6 的实际工作组目录；
+- 使用官方 `Meetings-Sx/Rx/Cx` 会议表解析中英文月份，不使用目录修改时间猜测会议日期；
+- 对多个匹配目录返回候选并阻止深度采集；
 - 读取会议议程并生成真实范围预览；
+- 通过重复的 `--include-tdoc` 参数限定已知 TDoc 及其关系链；
 - 根据自然语言课题、KI、Solution、TDoc 和公司过滤候选；
 - 对提案任务进行优先级排序；
 - 执行 `core` 或 `complete` 分阶段采集；
@@ -258,6 +289,9 @@ Agent 会按用户问题选择相关模式，不需要每次加载全部内容�
 包含不访问真实 3GPP 公共服务器的本地自动化测试，覆盖：
 
 - SA2#175-AH-e、KI#18、Solution Variant#18.7 黄金关系链；
+- 全部 18 个 SA、RAN、CT 工作组的父目录发现；
+- SA2、SA5、RAN1、CT3 的会议编号、日期和后缀解析；
+- 日期多候选、指定 TDoc、缺失 TDoc 及歧义阻断；
 - 错误关系归属隔离；
 - 模糊范围预览；
 - `core` 到 `complete` 恢复；
@@ -288,6 +322,8 @@ GitHub Actions 配置。每次推送或 Pull Request 都会在多个 Python 版�
 
 | 参数 | 说明 | 默认值 |
 |---|---|---|
+| `resolve` | 只解析会议编号或月份，不下载提案正文 | — |
+| `--include-tdoc` | 指定直接范围中的 TDoc，可重复 | 未指定 |
 | `--stage` | `core` 先取核心证据；`complete` 补齐有效范围 | `complete` |
 | `--max-concurrency` | 最大下载并发，范围 1～8 | `4` |
 | `--parse-workers` | 解析并发，范围 1～4 | `2` |
@@ -312,6 +348,8 @@ python scripts/collect_3gpp_evidence.py cache clear --yes
 ## 六、能力边界
 
 - 脚本当前原生解析 DOCX、PPTX、XLSX 等 OOXML 格式。
+- 工作组名称解析覆盖官方 SA1～SA6、RAN1～RAN6、CT1～CT6；TSG plenary、AHG 和 SWG 不冒充主工作组，但可通过显式官方 URL 分析。
+- 日期解析依赖公开的 3GPP 官方会议表。会议表或目录不可访问时会明确返回未解析，不会用目录修改时间代替会议日期。
 - PDF、图片、旧 `.doc` 及布局敏感内容应交给宿主 Agent 的通用文件能力。
 - 脚本不会代替 Agent 判断公司观点、共识、技术优劣或最终采纳含义。
 - 来源不可访问、文件损坏或覆盖不完整时，会在 `coverage.json` 中明确记录。
