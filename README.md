@@ -9,11 +9,13 @@
 - “梳理某个 Solution 从 baseline 到 approved 版本的变化。”
 - “这个课题有哪些争议？哪些提案被合并或采纳了？”
 
+Agent 负责理解问题、必要时澄清范围、判断公司观点并组织结论；项目中的 Python 脚本负责可重复的会议检索、提案下载、Office 文档解析、关系候选提取、证据索引和版本差异生成。
+
+项目不依赖 MCP、数据库、常驻服务、专用 UI 或第三方 Python 包。
+
 ### 为什么不直接让 Agent 分析？
 
-当然可以直接提问，能力较强的 Agent 通常也能完成分析；这个 Skill 的价值不是替代
-Agent 的推理，而是把 3GPP 提案分析中容易遗漏、容易误判且重复耗时的部分固化为一套
-稳定方法：
+当然可以直接提问，能力较强的 Agent 通常也能完成分析；这个 Skill 的价值不是替代 Agent 的推理，而是把 3GPP 提案分析中容易遗漏、容易误判且重复耗时的部分固化为一套稳定方法：
 
 - 先结合议程、正文、KI/Solution 标识和关系链确定范围，避免把关键词命中当成完整提案集合；
 - 统一追踪 baseline、revision、merge、input 和 approval，并保留可回查的证据位置；
@@ -22,15 +24,7 @@ Agent 的推理，而是把 3GPP 提案分析中容易遗漏、容易误判且�
 - 通过并行下载、缓存、断点续传、证据去重和版本差异减少等待及重复阅读；
 - 输出范围、覆盖率、缺失项和证据包，使结论更稳定、更快，也更容易复核。
 
-因此，对于偶尔查询一篇已知提案，直接提问可能已经足够；对于会议级、课题级、公司
-观点对比或方案演进分析，这个 Skill 能显著减少 Agent 走弯路，并降低遗漏范围、误判
-提案关系和给出无证据强结论的风险。
-
-Agent 负责理解问题、必要时澄清范围、判断公司观点并组织结论；项目中的 Python
-脚本负责可重复的会议检索、提案下载、Office 文档解析、关系候选提取、证据索引和
-版本差异生成。
-
-项目不依赖 MCP、数据库、常驻服务、专用 UI 或第三方 Python 包。
+因此，对于偶尔查询一篇已知提案，直接提问可能已经足够；对于会议级、课题级、公司观点对比或方案演进分析，这个 Skill 能显著减少 Agent 走弯路，并降低遗漏范围、误判提案关系和给出无证据强结论的风险。
 
 ## 一、最快开始
 
@@ -44,8 +38,7 @@ Agent 负责理解问题、必要时澄清范围、判断公司观点并组织�
 
 ### 方式二：手工安装到 Codex
 
-仓库根目录本身就是完整的 Skill 目录。克隆时请将目录命名为
-`analyze-3gpp-meeting-proposals`。
+仓库根目录本身就是完整的 Skill 目录。克隆时请将目录命名为 `analyze-3gpp-meeting-proposals`。
 
 Windows PowerShell：
 
@@ -59,8 +52,7 @@ macOS / Linux：
 git clone https://github.com/shrice123/3gpp-proposal-analysis-skill.git ~/.codex/skills/analyze-3gpp-meeting-proposals
 ```
 
-如果不使用 Git，也可以在 GitHub 页面选择 **Code → Download ZIP**，解压后将目录
-重命名为 `analyze-3gpp-meeting-proposals`，再复制到 Codex 的 `skills` 目录。
+如果不使用 Git，也可以在 GitHub 页面选择 **Code → Download ZIP**，解压后将目录重命名为 `analyze-3gpp-meeting-proposals`，再复制到 Codex 的 `skills` 目录。
 
 安装后重启 Codex。可以显式调用：
 
@@ -68,8 +60,7 @@ git clone https://github.com/shrice123/3gpp-proposal-analysis-skill.git ~/.codex
 $analyze-3gpp-meeting-proposals
 ```
 
-也可以直接提出 3GPP 会议、Agenda、KI、Solution、Solution Variant、TDoc、
-公司观点、共识、争议、合并或采纳情况等问题，由 Codex 自动触发。
+也可以直接提出 3GPP 会议、Agenda、KI、Solution、Solution Variant、TDoc、公司观点、共识、争议、合并或采纳情况等问题，由 Codex 自动触发。
 
 ### 更新已有安装
 
@@ -83,9 +74,7 @@ git -C "$env:USERPROFILE\.codex\skills\analyze-3gpp-meeting-proposals" pull
 
 ### Hermes 或其他 Agent
 
-将整个仓库复制到对应 Agent 的 Skill 目录，并确保 `SKILL.md` 位于该 Skill
-目录的根部。不同 Agent 和版本的 Skill 路径可能不同，应优先以宿主的 Skill
-安装说明为准。Hermes 用户可在安装后运行：
+将整个仓库复制到对应 Agent 的 Skill 目录，并确保 `SKILL.md` 位于该 Skill 目录的根部。不同 Agent 和版本的 Skill 路径可能不同，应优先以宿主的 Skill 安装说明为准。Hermes 用户可在安装后运行：
 
 ```text
 hermes skills list
@@ -116,8 +105,7 @@ hermes skills list
 
 > 分析 AI 相关课题。
 
-Skill 会指导 Agent 先获取真实会议范围预览，再根据实际 Agenda、KI、公司分布、
-争议 Solution 或提案关系给出可选分析方向，而不是盲目下载整场会议。
+Skill 会指导 Agent 先获取真实会议范围预览，再根据实际 Agenda、KI、公司分布、争议 Solution 或提案关系给出可选分析方向，而不是盲目下载整场会议。
 
 ### 2. 单独运行证据采集脚本
 
@@ -188,8 +176,7 @@ python scripts/collect_3gpp_evidence.py collect --meeting "SA2#175-AH-e" --query
 
 ### `agents/openai.yaml`
 
-保存 Skill 在支持该元数据格式的 Agent 中显示时所需的名称、简短说明和默认提示词。
-它不包含分析逻辑。
+保存 Skill 在支持该元数据格式的 Agent 中显示时所需的名称、简短说明和默认提示词。它不包含分析逻辑。
 
 ### `scripts/collect_3gpp_evidence.py`
 
@@ -295,8 +282,7 @@ GitHub Actions 配置。每次推送或 Pull Request 都会在多个 Python 版�
 | `document_index.jsonl` | 标题、章节、标识符和段落索引，供 Agent 按需回查 |
 | `diffs.json` | baseline、revision、approved 等文档之间带定位的段落差异 |
 
-这些文件共同构成可复核的证据包。不能只查看搜索命中或 `evidence.jsonl` 就声称范围完整，
-还应同时检查 `scope_preview.json`、`manifest.json` 和 `coverage.json`。
+这些文件共同构成可复核的证据包。不能只查看搜索命中或 `evidence.jsonl` 就声称范围完整，还应同时检查 `scope_preview.json`、`manifest.json` 和 `coverage.json`。
 
 ## 五、常用参数
 
@@ -339,8 +325,7 @@ python scripts/collect_3gpp_evidence.py cache clear --yes
 
 - Windows：`%LOCALAPPDATA%\3GPP Proposal Cache`
 - macOS：`~/Library/Caches/3gpp-proposal-analysis`
-- Linux：`$XDG_CACHE_HOME/3gpp-proposal-analysis`，未设置时使用
-  `~/.cache/3gpp-proposal-analysis`
+- Linux：`$XDG_CACHE_HOME/3gpp-proposal-analysis`，未设置时使用 `~/.cache/3gpp-proposal-analysis`
 
 不要将提案下载文件、缓存、证据输出或 `.part` 文件提交到 Git 仓库。
 
@@ -356,5 +341,4 @@ python -m unittest discover -s tests -v
 
 本项目采用 MIT License。
 
-本项目为独立开源项目，与 3GPP 不存在隶属或官方认可关系。3GPP 及相关标识的权利
-归其各自权利人所有。使用者应遵守相关来源的访问、使用和引用要求。
+本项目为独立开源项目，与 3GPP 不存在隶属或官方认可关系。3GPP 及相关标识的权利归其各自权利人所有。使用者应遵守相关来源的访问、使用和引用要求。
