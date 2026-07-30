@@ -1,0 +1,51 @@
+# Collection performance and recovery
+
+## Defaults
+
+Use four download workers, two parse workers, batches of eight, and three retries. These are conservative per-host limits for the public 3GPP server.
+
+```text
+collect ... --max-concurrency 4 --parse-workers 2 --batch-size 8 --retries 3
+```
+
+The scheduler lowers its active window after throttling, server errors, timeouts, or incomplete responses. Do not compensate by starting another collector against the same meeting.
+
+## Stages
+
+- `--stage core`: collect baseline and approved documents identified in meeting metadata. If neither role is identifiable, collect the direct query matches.
+- `--stage complete`: reuse a matching schema-v2 manifest and add the remaining direct and explicit-relation documents.
+- Reuse the same output directory and exact meeting/query/company inputs when continuing from core to complete.
+
+The stage changes execution order, not the interpreted scope.
+
+## Cache
+
+The default user cache stores only public source files and deterministic parsed data. It never stores the user question, Agent inference, or viewpoint conclusions.
+
+```text
+cache info
+cache clear --yes
+collect ... --cache-dir "<path>"
+collect ... --no-cache
+collect ... --refresh
+```
+
+Use `--cache-dir` to share a deliberate cache location across hosts. Use `--no-cache` when persistent public files are not acceptable. Use `--refresh` to bypass cached bodies; do not use it routinely.
+
+The collector validates cache entries with ETag or Last-Modified, resumes partial files with Range/If-Range, validates ZIPs, and atomically replaces completed payloads. A parser-version change reuses the raw file but regenerates deterministic parsed data.
+Both `preview` and `collect` conditionally cache public meeting metadata. Repeated previews can therefore receive a 304 with zero metadata body bytes; inspect `metadata_cache_hits` and `metadata_body_bytes` in `coverage.json`.
+
+Only execute `cache clear --yes` after an explicit user request. Report the removed location and size.
+
+## Progress and recovery
+
+Inspect these schema-v2 metrics:
+
+- `manifest.json`: priority, state, cache state, validators, hashes, retries, bytes, and timings per TDoc.
+- `coverage.json`: body bytes, cache and parsed-cache hits, adaptive concurrency, retries, first-evidence time, failures, and completeness.
+- `document_index.jsonl`: deterministic paragraph index and change state.
+- `diffs.json`: baseline/revision/input differences when both documents are available.
+
+An interrupted collection can be restarted with the same command and output directory. Completed documents remain in the manifest; valid `.part` files and cache entries resume instead of restarting.
+
+Do not treat a fast or cache-heavy run as complete unless `coverage.json` reports the expected scope and explicitly accounts for missing, unsupported, or failed documents.

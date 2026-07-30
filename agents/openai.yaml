@@ -1,0 +1,4 @@
+interface:
+  display_name: "3GPP Meeting Proposal Analysis"
+  short_description: "Evidence-grounded 3GPP meeting proposal analysis"
+  default_prompt: "Use $analyze-3gpp-meeting-proposals to scope and analyze 3GPP meeting proposals with traceable evidence."
