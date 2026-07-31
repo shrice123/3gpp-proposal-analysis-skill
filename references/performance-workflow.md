@@ -10,6 +10,10 @@ collect ... --max-concurrency 4 --parse-workers 2 --batch-size 8 --retries 3
 
 The scheduler lowers its active window after throttling, server errors, timeouts, or incomplete responses. Do not compensate by starting another collector against the same meeting.
 
+The source router tries the public 3GPP host before its configured private file mirror. A DNS, connection, timeout, access-denied, throttling, or server failure opens a circuit for the remainder of the run so later 3GPP resources go directly to the mirror. A resource-specific 404 still tries the mirror but does not mark the whole public host unavailable.
+
+Use `--mirror-root "<private-mirror-uri>"` or `THREEGPP_MIRROR_ROOT` to override the configured mirror and `--no-mirror` to disable it. A mirror can preserve the public `ftp/` and `dynareport/` hierarchy or expose the TSG FTP directories at its root. Inspect `source_routing` and `source_fallbacks` in `coverage.json` when diagnosing access.
+
 ## Stages
 
 - `resolve`: read only the official TSG parent index, working-group directory index, and date calendar needed to identify a meeting. It never downloads proposal bodies.
@@ -25,7 +29,7 @@ An explicit seed cannot reveal a reverse relationship that exists only in an uns
 
 ## Cache
 
-The default user cache stores only public source files and deterministic parsed data. It never stores the user question, Agent inference, or viewpoint conclusions.
+The default user cache stores source files obtained from public or configured private mirrors and deterministic parsed data. It never stores the user question, Agent inference, or viewpoint conclusions.
 
 ```text
 cache info

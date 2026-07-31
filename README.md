@@ -178,6 +178,7 @@ scripts\run-collector.cmd resolve --meeting "CT3 2026年5月"
 │   ├── collect_3gpp_evidence.py
 │   ├── run-collector.cmd
 │   ├── run-collector.ps1
+│   ├── source_router.py
 │   └── transfer_runtime.py
 ├── tests/
 ├── .github/workflows/
@@ -228,6 +229,10 @@ scripts\run-collector.cmd resolve --meeting "CT3 2026年5月"
 - 在任务中断后根据现有输出和缓存恢复。
 
 它只生成事实、证据和关系候选，**不会自行生成公司观点、共识或技术结论**。
+
+### `scripts/source_router.py`
+
+统一处理公共 3GPP URL、私有文件镜像、`file://` URI 和本地路径之间的安全映射，并维护单次运行的公共主机熔断和来源覆盖统计。
 
 ### `scripts/transfer_runtime.py`
 
@@ -332,6 +337,8 @@ GitHub Actions 配置。每次推送或 Pull Request 都会在多个 Python 版�
 | `--cache-dir` | 覆盖默认缓存目录 | 未指定 |
 | `--no-cache` | 完全关闭持久化缓存 | 关闭 |
 | `--refresh` | 强制重新获取正文 | 关闭 |
+| `--mirror-root` | 临时覆盖预配置的私有镜像根目录 | 环境默认 |
+| `--no-mirror` | 禁用私有镜像回退 | 关闭 |
 
 查看缓存：
 
@@ -367,7 +374,19 @@ python scripts/collect_3gpp_evidence.py cache clear --yes
 
 不要将提案下载文件、缓存、证据输出或 `.part` 文件提交到 Git 仓库。
 
-## 八、运行测试
+## 八、私有镜像回退
+
+当公共 3GPP 服务不可访问时，采集器会自动尝试预配置的私有文件镜像。同一次运行确认公共主机不可达后，后续请求会直接尝试镜像，避免重复等待网络超时。
+
+普通用户无需配置。需要临时使用其他镜像时，可以使用通用占位地址：
+
+```bash
+python scripts/collect_3gpp_evidence.py resolve --meeting "SA5 May 2026" --mirror-root "<private-mirror-uri>"
+```
+
+也可以设置 `THREEGPP_MIRROR_ROOT`，或用 `--no-mirror` 禁用镜像回退。`--mirror-root`、`--no-mirror` 同样适用于 `preview` 和 `collect`。README 不记录任何组织内部的真实镜像地址。
+
+## 九、运行测试
 
 ```bash
 python -m unittest discover -s tests -v
@@ -375,7 +394,7 @@ python -m unittest discover -s tests -v
 
 项目本身不需要安装第三方 Python 依赖。
 
-## 九、许可证和声明
+## 十、许可证和声明
 
 本项目采用 MIT License。
 

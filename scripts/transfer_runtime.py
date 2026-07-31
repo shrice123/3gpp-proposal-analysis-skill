@@ -12,6 +12,7 @@ import http.client
 import json
 import os
 import random
+import re
 import shutil
 import sys
 import threading
@@ -24,7 +25,15 @@ from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
-USER_AGENT = "Mozilla/5.0 (compatible; 3GPP-evidence-collector/2.0)"
+from source_router import (
+    SourceCandidate,
+    SourceRouter,
+    host_level_failure,
+    local_source_path,
+    safe_error,
+)
+
+USER_AGENT = "Mozilla/5.0 (compatible; 3GPP-evidence-collector/2.2)"
 CHUNK_SIZE = 256 * 1024
 LOCK_STALE_SECONDS = 15 * 60
 
@@ -111,6 +120,9 @@ class DownloadResult:
     parsed_cache_hit: bool = False
     pressure_events: int = 0
     error: str | None = None
+    effective_source: str | None = None
+    source_kind: str | None = None
+    fallback_reason: str | None = None
 
 
 class CacheManager:
@@ -217,6 +229,7 @@ class StreamingDownloader:
         refresh: bool = False,
         timeout: int = 45,
         sleep: Callable[[float], None] = time.sleep,
+        router: SourceRouter | None = None,
     ) -> None:
         self.cache = cache
         self.work_dir = work_dir.resolve()
@@ -225,6 +238,7 @@ class StreamingDownloader:
         self.refresh = refresh
         self.timeout = timeout
         self.sleep = sleep
+        self.router = router or SourceRouter()
 
     def _paths(self, source: str) -> tuple[Path, Path, Path]:
         if self.cache.enabled:
@@ -255,11 +269,18 @@ class StreamingDownloader:
         if Path(urllib.parse.urlparse(source).path).suffix.casefold() == ".zip" and not valid_zip(path):
             raise TransferError(f"Downloaded ZIP is invalid: {source}", pressure=True)
 
-    def _local(self, task: DownloadTask) -> DownloadResult:
+    def _local(self, task: DownloadTask, candidate: SourceCandidate) -> DownloadResult:
         started = time.monotonic()
-        path = Path(task.source).resolve()
+        path = local_source_path(candidate.effective).resolve()
         if not path.is_file():
-            return DownloadResult(task, "fetch_error", None, error=f"Local source missing: {path}")
+            return DownloadResult(
+                task,
+                "fetch_error",
+                None,
+                error=f"Local source missing: {path}",
+                effective_source=candidate.effective,
+                source_kind=candidate.kind,
+            )
         return DownloadResult(
             task,
             "local",
@@ -267,13 +288,72 @@ class StreamingDownloader:
             sha256=file_sha256(path),
             content_length=path.stat().st_size,
             elapsed_seconds=time.monotonic() - started,
-            cache_hit=True,
+            cache_hit=candidate.kind != "private_mirror",
+            effective_source=candidate.effective,
+            source_kind=candidate.kind,
         )
 
     def fetch(self, task: DownloadTask) -> DownloadResult:
-        parsed = urllib.parse.urlparse(task.source)
+        errors: list[str] = []
+        last_result: DownloadResult | None = None
+        for candidate in self.router.candidates(task.source):
+            self.router.note_attempt(candidate)
+            result = self._fetch_candidate(task, candidate)
+            if result.state != "fetch_error":
+                self.router.note_success(candidate)
+                result.fallback_reason = "; ".join(errors) or None
+                return result
+            last_result = result
+            error = safe_error(candidate, result.error or result.state)
+            errors.append(f"{candidate.kind}: {error}")
+            status = re.match(r"HTTP (\d{3})", error)
+            if candidate.kind == "public" and status:
+                code = int(status.group(1))
+                failure: BaseException = urllib.error.HTTPError(
+                    candidate.effective, code, error, None, None
+                )
+            elif candidate.kind == "public" and error.startswith("Downloaded"):
+                failure = TransferError(error)
+            elif candidate.kind == "public":
+                failure = urllib.error.URLError(error)
+            else:
+                failure = TransferError(error)
+            self.router.note_failure(candidate, failure)
+        if not self.refresh:
+            payload, meta_path, _partial_meta_path = self._paths(task.source)
+            if payload.exists():
+                try:
+                    self._validate_payload(task.source, payload)
+                    meta = self._read_json(meta_path)
+                    digest = file_sha256(payload)
+                    if not meta.get("sha256") or meta.get("sha256") == digest:
+                        self.router.note_stale_cache()
+                        return DownloadResult(
+                            task,
+                            "cached",
+                            str(payload),
+                            sha256=digest,
+                            etag=meta.get("etag"),
+                            last_modified=meta.get("last_modified"),
+                            content_length=payload.stat().st_size,
+                            cache_hit=True,
+                            error=None,
+                            effective_source=str(payload),
+                            source_kind="stale_cache",
+                            fallback_reason="; ".join(errors),
+                        )
+                except (OSError, TransferError):
+                    pass
+        if last_result is None:
+            return DownloadResult(task, "fetch_error", None, error="No source candidates")
+        last_result.error = "; ".join(errors)
+        last_result.fallback_reason = errors[-2] if len(errors) > 1 else None
+        return last_result
+
+    def _fetch_candidate(self, task: DownloadTask, candidate: SourceCandidate) -> DownloadResult:
+        parsed = urllib.parse.urlparse(candidate.effective)
         if parsed.scheme not in ("http", "https"):
-            return self._local(task)
+            return self._local(task, candidate)
         started = time.monotonic()
         pressure_events = 0
         total_body_bytes = 0
@@ -299,7 +379,7 @@ class StreamingDownloader:
                     if validator:
                         headers["Range"] = f"bytes={existing}-"
                         headers["If-Range"] = str(validator)
-                request = urllib.request.Request(task.source, headers=headers)
+                request = urllib.request.Request(candidate.effective, headers=headers)
                 try:
                     response = urllib.request.urlopen(request, timeout=self.timeout)
                     status = getattr(response, "status", response.getcode())
@@ -312,6 +392,8 @@ class StreamingDownloader:
                         existing = 0
                     response_meta = {
                         "url": normalized_url(task.source),
+                        "effective_source": candidate.effective,
+                        "source_kind": candidate.kind,
                         "etag": response_headers.get("ETag"),
                         "last_modified": response_headers.get("Last-Modified"),
                         "content_length": int(response_headers["Content-Length"]) if response_headers.get("Content-Length", "").isdigit() else None,
@@ -368,6 +450,8 @@ class StreamingDownloader:
                         retries=attempt,
                         elapsed_seconds=time.monotonic() - started,
                         pressure_events=pressure_events,
+                        effective_source=candidate.effective,
+                        source_kind=candidate.kind,
                     )
                 except urllib.error.HTTPError as exc:
                     if exc.code == 304 and payload.exists():
@@ -391,6 +475,8 @@ class StreamingDownloader:
                             elapsed_seconds=time.monotonic() - started,
                             cache_hit=True,
                             pressure_events=pressure_events,
+                            effective_source=candidate.effective,
+                            source_kind=candidate.kind,
                         )
                     if exc.code == 416 and partial.exists():
                         try:
@@ -411,6 +497,8 @@ class StreamingDownloader:
                                 retries=attempt,
                                 elapsed_seconds=time.monotonic() - started,
                                 pressure_events=pressure_events,
+                                effective_source=candidate.effective,
+                                source_kind=candidate.kind,
                             )
                         except TransferError:
                             with contextlib.suppress(OSError):
@@ -423,6 +511,8 @@ class StreamingDownloader:
                     except ValueError:
                         delay = None
                     last_error = f"HTTP {exc.code}: {exc.reason}"
+                    if candidate.kind == "public":
+                        break
                     if attempt >= self.retries:
                         break
                     self.sleep(delay if delay is not None else (2**attempt + random.random() * 0.25))
@@ -430,6 +520,8 @@ class StreamingDownloader:
                     pressure = isinstance(exc, TransferError) and exc.pressure
                     pressure_events += int(pressure)
                     last_error = str(exc)
+                    if candidate.kind == "public" and host_level_failure(exc):
+                        break
                     if attempt >= self.retries:
                         break
                     self.sleep(2**attempt + random.random() * 0.25)
@@ -443,6 +535,8 @@ class StreamingDownloader:
                 elapsed_seconds=time.monotonic() - started,
                 pressure_events=pressure_events,
                 error=last_error or f"Unable to download {task.source}",
+                effective_source=candidate.effective,
+                source_kind=candidate.kind,
             )
 
 

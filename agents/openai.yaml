@@ -1,4 +1,4 @@
 interface:
   display_name: "3GPP Meeting Proposal Analysis"
-  short_description: "SA, RAN, and CT proposal analysis with traceable evidence"
-  default_prompt: "Use $analyze-3gpp-meeting-proposals to resolve a 3GPP meeting and analyze its proposals with traceable evidence."
+  short_description: "SA, RAN, and CT analysis with evidence and mirror fallback"
+  default_prompt: "Use $analyze-3gpp-meeting-proposals to resolve a 3GPP meeting through available public or private sources and analyze its proposals with traceable evidence."
