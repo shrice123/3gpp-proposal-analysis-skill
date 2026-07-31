@@ -1,6 +1,6 @@
 ---
 name: analyze-3gpp-meeting-proposals
-description: Resolve, scope, retrieve, trace, and analyze 3GPP meeting proposals across SA1-SA6, RAN1-RAN6, and CT1-CT6 with auditable evidence. Use when a user identifies a meeting by number, month, official URL, or local directory, or asks about an Agenda Item, Key Issue, Solution or Solution Variant, TDoc chain, company position, consensus, disagreement, adoption, or proposal evolution, including vague whole-meeting or AI-related requests. Also use when producing a sourced comparison or handing evidence to generic DOCX/PPTX capabilities. Do not require or invoke a proposal-analysis MCP service.
+description: Resolve, scope, retrieve, trace, and analyze 3GPP meeting proposals across SA1-SA6, RAN1-RAN6, and CT1-CT6 with auditable evidence and automatic private-mirror fallback. Use when a user identifies a meeting by number, month, official URL, file URI, or local directory, or asks about an Agenda Item, Key Issue, Solution or Solution Variant, TDoc chain, company position, consensus, disagreement, adoption, or proposal evolution, including vague whole-meeting or AI-related requests. Also use when producing a sourced comparison or handing evidence to generic DOCX/PPTX capabilities. Do not require or invoke a proposal-analysis MCP service.
 ---
 
 # Analyze 3GPP Meeting Proposals
@@ -68,13 +68,15 @@ Read [references/evidence-rules.md](references/evidence-rules.md) before judging
 
 ## Handle failures and unsupported formats
 
-- Retry a 3GPP request with the script's normal User-Agent and Referer behavior; do not claim completeness when access remains partial.
+- Let the script try the public 3GPP source first and automatically fall back to its configured private file mirror. After a host-level public failure opens the run-local circuit, do not force repeated public retries.
+- Use `--mirror-root "<private-mirror-uri>"` or `THREEGPP_MIRROR_ROOT` only to override the built-in environment default. Use `--no-mirror` when private-mirror access is inappropriate. Never print mirror credentials or copy private source paths into the final answer.
+- Retry through the script's normal User-Agent, Referer, source-routing, and coverage behavior; do not claim completeness when both public and mirror access remain partial.
 - Let the script use its bounded download pool and public-document cache. Do not increase concurrency above 8 or launch competing manual download loops.
 - Use `--no-cache` when persistence is inappropriate and `--refresh` when the remote body must be reacquired. Never clear the shared cache unless the user explicitly requests it.
 - Use generic PDF/document/presentation/spreadsheet capabilities for PDF, legacy `.doc`, images, malformed OOXML, or layout-sensitive evidence.
 - If Python is unavailable, follow the same workflow manually: inspect the meeting index and agenda, build a TDoc manifest, download only candidate proposals, trace explicit cross-references, and maintain a coverage ledger.
 - On Windows, use `scripts/run-collector.cmd` when Python is installed but not available through the current shell's `PATH` or PowerShell policy blocks direct `.ps1` execution. Add `--no-cache` when the host forbids writes to the user cache.
-- If official directory discovery is blocked, use a browser only to locate the exact public 3GPP meeting URL. Rerun `resolve`, `preview`, or `collect` with that URL; do not turn the fallback into a serial manual download loop.
+- If both public and private-mirror discovery fail, reuse a validated cache or ask for an explicit accessible local meeting directory. Use a browser only to locate an exact public 3GPP meeting URL, then rerun `resolve`, `preview`, or `collect`; do not turn the fallback into a serial manual download loop.
 - Never bypass the collector's bounded concurrency by launching parallel collectors or downloading proposals one by one in the browser.
 - If the meeting, KI, Solution, company, or premise appears inconsistent, show the conflicting evidence and resolve the smallest consequential ambiguity before deep analysis.
 

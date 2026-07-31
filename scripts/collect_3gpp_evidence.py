@@ -43,10 +43,18 @@ from transfer_runtime import (  # noqa: E402
     atomic_json,
     default_cache_root,
 )
+from source_router import (  # noqa: E402
+    SourceCandidate,
+    SourceRouter,
+    candidate_local_bytes,
+    file_uri_to_path,
+    is_file_uri,
+    safe_error,
+)
 
-VERSION = "2.1.0"
-PARSER_VERSION = "2.1"
-USER_AGENT = "Mozilla/5.0 (compatible; 3GPP-evidence-collector/2.1)"
+VERSION = "2.2.0"
+PARSER_VERSION = "2.2"
+USER_AGENT = "Mozilla/5.0 (compatible; 3GPP-evidence-collector/2.2)"
 TDoc_RE = re.compile(r"\b([A-Z]\d[-–]?\d{7})\b", re.I)
 KI_RE = re.compile(r"\bKI\s*#?\s*(\d+(?:\.\d+)*)\b", re.I)
 SV_RE = re.compile(r"\b(?:Solution\s+Variant|SV)\s*#?\s*(\d+(?:\.\d+)*)\b", re.I)
@@ -169,16 +177,18 @@ def safe_name(value: str) -> str:
 
 def source_path(value: str) -> str:
     parsed = urllib.parse.urlparse(value)
-    return urllib.parse.unquote(parsed.path) if parsed.scheme in ("http", "https") else value
+    return urllib.parse.unquote(parsed.path) if parsed.scheme in ("http", "https", "file") else value
 
 
 class Fetcher:
-    def __init__(self) -> None:
+    def __init__(self, router: SourceRouter | None = None) -> None:
+        self.router = router or SourceRouter()
         self.checked = 0
         self.failures: list[dict[str, str]] = []
         self.body_bytes = 0
         self.cache_hits: set[str] = set()
         self.last_headers: dict[str, dict[str, str]] = {}
+        self.effective_sources: dict[str, dict[str, str]] = {}
 
     def bytes(
         self,
@@ -189,45 +199,76 @@ class Fetcher:
         cached_data: bytes | None = None,
     ) -> bytes:
         self.checked += 1
-        parsed = urllib.parse.urlparse(source)
-        if parsed.scheme in ("http", "https"):
-            headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
-            if referer:
-                headers["Referer"] = referer
-            if extra_headers:
-                headers.update(extra_headers)
-            request = urllib.request.Request(source, headers=headers)
-            partial = b""
-            for attempt in range(2):
-                try:
-                    with urllib.request.urlopen(request, timeout=45) as response:
-                        self.last_headers[source] = {key.casefold(): value for key, value in response.headers.items()}
-                        body = response.read()
-                        self.body_bytes += len(body)
-                        return body
-                except urllib.error.HTTPError as exc:
-                    if exc.code == 304 and cached_data is not None:
-                        self.cache_hits.add(source)
-                        return cached_data
-                    self.failures.append({"source": source, "error": f"HTTP {exc.code}: {exc.reason}"})
-                    raise CollectorError(f"Unable to fetch {source}: HTTP {exc.code}") from exc
-                except http.client.IncompleteRead as exc:
-                    partial = exc.partial or partial
-                    if attempt == 0:
-                        continue
-                except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                    self.failures.append({"source": source, "error": str(exc)})
-                    raise CollectorError(f"Unable to fetch {source}: {exc}") from exc
-            if partial:
-                self.body_bytes += len(partial)
-                self.failures.append({"source": source, "error": "incomplete response; partial content used"})
-                return partial
-            raise CollectorError(f"Unable to fetch complete content from {source}")
-        try:
-            return Path(source).read_bytes()
-        except OSError as exc:
-            self.failures.append({"source": source, "error": str(exc)})
-            raise CollectorError(f"Unable to read {source}: {exc}") from exc
+        errors: list[str] = []
+        for candidate in self.router.candidates(source):
+            self.router.note_attempt(candidate)
+            try:
+                body = self._candidate_bytes(
+                    candidate,
+                    source,
+                    referer,
+                    extra_headers=extra_headers,
+                    cached_data=cached_data,
+                )
+                self.router.note_success(candidate)
+                self.effective_sources[source] = {
+                    "requested_source": source,
+                    "effective_source": candidate.effective,
+                    "source_kind": candidate.kind,
+                    "fallback_reason": "; ".join(errors),
+                }
+                return body
+            except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError, OSError, CollectorError) as exc:
+                self.router.note_failure(candidate, exc)
+                errors.append(f"{candidate.kind}: {safe_error(candidate, exc)}")
+        error = "; ".join(errors) or "no source candidates"
+        self.failures.append({"source": source, "error": error})
+        raise CollectorError(f"Unable to access {source}: {error}")
+
+    def _candidate_bytes(
+        self,
+        candidate: SourceCandidate,
+        logical_source: str,
+        referer: str | None,
+        *,
+        extra_headers: dict[str, str] | None,
+        cached_data: bytes | None,
+    ) -> bytes:
+        parsed = urllib.parse.urlparse(candidate.effective)
+        if parsed.scheme not in ("http", "https"):
+            return candidate_local_bytes(candidate)
+        headers = {"User-Agent": USER_AGENT, "Accept": "*/*"}
+        if referer:
+            headers["Referer"] = referer
+        if extra_headers:
+            headers.update(extra_headers)
+        request = urllib.request.Request(candidate.effective, headers=headers)
+        partial = b""
+        for attempt in range(2):
+            try:
+                with urllib.request.urlopen(request, timeout=45) as response:
+                    self.last_headers[logical_source] = {
+                        key.casefold(): value for key, value in response.headers.items()
+                    }
+                    body = response.read()
+                    self.body_bytes += len(body)
+                    return body
+            except urllib.error.HTTPError as exc:
+                if exc.code == 304 and cached_data is not None:
+                    self.cache_hits.add(logical_source)
+                    return cached_data
+                raise
+            except http.client.IncompleteRead as exc:
+                partial = exc.partial or partial
+                if attempt == 0:
+                    continue
+            except (urllib.error.URLError, TimeoutError, OSError):
+                raise
+        if partial:
+            raise CollectorError(
+                f"Incomplete response from {candidate.effective}: received {len(partial)} bytes"
+            )
+        raise CollectorError(f"Incomplete response from {candidate.effective}")
 
     def text(self, source: str, referer: str | None = None) -> str:
         raw = self.bytes(source, referer)
@@ -264,12 +305,35 @@ def cached_metadata_bytes(
                 headers["If-None-Match"] = str(metadata["etag"])
             if metadata.get("last_modified"):
                 headers["If-Modified-Since"] = str(metadata["last_modified"])
-        raw = fetcher.bytes(
-            source,
-            referer,
-            extra_headers=headers,
-            cached_data=cached_data if headers else None,
-        )
+        try:
+            raw = fetcher.bytes(
+                source,
+                referer,
+                extra_headers=headers,
+                cached_data=cached_data if headers else None,
+            )
+        except CollectorError:
+            cached_hash = hashlib.sha256(cached_data).hexdigest() if cached_data is not None else None
+            cache_valid = (
+                cached_data is not None
+                and not refresh
+                and not metadata.get("partial")
+                and (
+                    not metadata.get("sha256")
+                    or metadata.get("sha256") == cached_hash
+                )
+            )
+            if not cache_valid:
+                raise
+            fetcher.cache_hits.add(source)
+            fetcher.router.note_stale_cache()
+            fetcher.effective_sources[source] = {
+                "requested_source": source,
+                "effective_source": str(payload_path),
+                "source_kind": "stale_cache",
+                "fallback_reason": "Public and private-mirror sources were unavailable.",
+            }
+            return cached_data
         if source in fetcher.cache_hits:
             if metadata.get("partial"):
                 fetcher.failures.append({"source": source, "error": "cached metadata is from an incomplete response"})
@@ -287,6 +351,7 @@ def cached_metadata_bytes(
             cache.meta_path(source),
             {
                 "url": source,
+                **fetcher.effective_sources.get(source, {}),
                 "etag": response_headers.get("etag"),
                 "last_modified": response_headers.get("last-modified"),
                 "content_length": response_headers.get("content-length"),
@@ -545,6 +610,37 @@ def resolve_meeting(
             "confidence": "explicit",
             "candidates": [],
         }
+    if is_file_uri(hint):
+        local = file_uri_to_path(hint)
+        if local.exists():
+            resolved = hint.rstrip("/") + ("/" if local.is_dir() else "")
+            return {
+                "input": hint,
+                "normalized_group": None,
+                "tsg": None,
+                "meeting_hint": None,
+                "date_hint": None,
+                "status": "resolved",
+                "selected_url": resolved,
+                "resolved": resolved,
+                "kind": "file_uri",
+                "confidence": "explicit",
+                "candidates": [],
+            }
+        return {
+            "input": hint,
+            "normalized_group": None,
+            "tsg": None,
+            "meeting_hint": None,
+            "date_hint": None,
+            "status": "unresolved",
+            "selected_url": None,
+            "resolved": None,
+            "kind": "file_uri",
+            "confidence": "unresolved",
+            "candidates": [],
+            "warning": "The file URI does not resolve to an accessible file or directory.",
+        }
     local = Path(hint)
     if local.exists():
         resolved = str(local.resolve())
@@ -711,8 +807,8 @@ def crawl_source(
     source = resolved.get("resolved")
     if not source:
         return []
-    if resolved["kind"] == "local":
-        root = Path(source)
+    if resolved["kind"] in ("local", "file_uri"):
+        root = file_uri_to_path(source) if resolved["kind"] == "file_uri" else Path(source)
         return [str(path) for path in root.rglob("*") if path.is_file()]
     files: list[str] = []
     seen: set[str] = set()
@@ -1460,11 +1556,19 @@ def task_priority(tdoc: str, record_by_id: dict[str, dict[str, Any]], matched_id
     return 2 if record else 3
 
 
+def router_from_args(args: argparse.Namespace) -> SourceRouter:
+    return SourceRouter(
+        getattr(args, "mirror_root", None),
+        mirror_enabled=not getattr(args, "no_mirror", False),
+    )
+
+
 def collect(args: argparse.Namespace) -> int:
     run_started = time.monotonic()
     output = Path(args.output).resolve()
     output.mkdir(parents=True, exist_ok=True)
-    fetcher = Fetcher()
+    router = router_from_args(args)
+    fetcher = Fetcher(router)
     aliases = load_aliases(args.aliases)
     cache_enabled = not args.no_cache and (
         bool(args.cache_dir)
@@ -1513,7 +1617,14 @@ def collect(args: argparse.Namespace) -> int:
             continue
         for inner_name, inner_data in extract_archive(source, raw):
             evidence, state = extract_supported(inner_name, inner_data)
-            metadata_manifest.append({"source": source, "inner_file": inner_name, "state": state})
+            metadata_manifest.append(
+                {
+                    "source": source,
+                    **fetcher.effective_sources.get(source, {}),
+                    "inner_file": inner_name,
+                    "state": state,
+                }
+            )
             records.extend(agenda_records(source, evidence))
         if "tdocsbyagenda.htm" in source_path(source).casefold() and records:
             break
@@ -1653,6 +1764,8 @@ def collect(args: argparse.Namespace) -> int:
         "configured_concurrency": getattr(args, "max_concurrency", 0),
         "first_evidence_seconds": None,
         "stage_timings": {"total_seconds": time.monotonic() - run_started},
+        "source_routing": router.coverage(),
+        "source_fallbacks": list(router.fallbacks),
     }
     write_json(output / "scope_preview.json", preview)
     if args.command == "preview" or resolution_blocked:
@@ -1696,6 +1809,7 @@ def collect(args: argparse.Namespace) -> int:
         output / ".transfer",
         retries=args.retries,
         refresh=args.refresh,
+        router=router,
     )
     related_ids.update(
         endpoint
@@ -1760,6 +1874,11 @@ def collect(args: argparse.Namespace) -> int:
                 "parsed_files": parsed_count,
                 "unsupported_files": unsupported,
                 "failures": current_failures,
+                "completeness": (
+                    "partial"
+                    if warnings or current_failures or unsupported or router.stale_cache_hits
+                    else "no_known_gaps"
+                ),
                 "total_body_bytes": sum(result.body_bytes for result in transfer_results),
                 "resumed_bytes": sum(result.resumed_bytes for result in transfer_results),
                 "cache_hits": current_cache_hits,
@@ -1771,6 +1890,8 @@ def collect(args: argparse.Namespace) -> int:
                 "resumed_documents": resumed_documents,
                 "stage": args.stage,
                 "run_state": "in_progress",
+                "source_routing": router.coverage(),
+                "source_fallbacks": list(router.fallbacks),
             },
         )
 
@@ -1834,6 +1955,9 @@ def collect(args: argparse.Namespace) -> int:
                         "download_seconds": result.elapsed_seconds,
                         "retry_count": result.retries,
                         "error": result.error,
+                        "effective_source": result.effective_source,
+                        "source_kind": result.source_kind,
+                        "fallback_reason": result.fallback_reason,
                     }
                     flush_state()
                     return
@@ -1845,11 +1969,18 @@ def collect(args: argparse.Namespace) -> int:
                 document_index.extend(parsed.get("document_index", []))
                 new_relationships = [item for item in parsed.get("relationships", []) if isinstance(item, dict)]
                 relationships.extend(new_relationships)
-                state = "cached_processed" if result.cache_hit else ("local_processed" if result.state == "local" else "processed")
+                state = (
+                    "local_processed"
+                    if result.state == "local"
+                    else ("cached_processed" if result.cache_hit else "processed")
+                )
                 document_by_key[(result.task.tdoc, result.task.source)] = {
                     "tdoc": result.task.tdoc,
                     "state": state,
                     "source": result.task.source,
+                    "effective_source": result.effective_source,
+                    "source_kind": result.source_kind,
+                    "fallback_reason": result.fallback_reason,
                     "priority": result.task.priority,
                     "cache_state": "parsed_hit" if result.parsed_cache_hit else ("hit" if result.cache_hit else "miss"),
                     "etag": result.etag,
@@ -1911,7 +2042,11 @@ def collect(args: argparse.Namespace) -> int:
         "unsupported_files": unsupported,
         "failures": all_failures,
         "relationship_expansion_stable": not pending,
-        "completeness": "partial" if warnings or all_failures or unsupported or has_missing else "no_known_gaps",
+        "completeness": (
+            "partial"
+            if warnings or all_failures or unsupported or has_missing or router.stale_cache_hits
+            else "no_known_gaps"
+        ),
         "total_body_bytes": sum(result.body_bytes for result in transfer_results),
         "resumed_bytes": sum(result.resumed_bytes for result in transfer_results),
         "cache_hits": cache_hits,
@@ -1927,6 +2062,8 @@ def collect(args: argparse.Namespace) -> int:
         "stage": args.stage,
         "run_state": "complete",
         "stage_timings": {"total_seconds": total_seconds},
+        "source_routing": router.coverage(),
+        "source_fallbacks": list(router.fallbacks),
     }
     flush_state()
     write_json(output / "coverage.json", coverage)
@@ -1947,7 +2084,8 @@ def collect(args: argparse.Namespace) -> int:
 
 
 def resolve_command(args: argparse.Namespace) -> int:
-    fetcher = Fetcher()
+    router = router_from_args(args)
+    fetcher = Fetcher(router)
     cache = CacheManager(Path(args.cache_dir) if args.cache_dir else None, enabled=not args.no_cache)
     meetings = [
         resolve_meeting(fetcher, hint, cache, refresh=args.refresh)
@@ -1962,6 +2100,8 @@ def resolve_command(args: argparse.Namespace) -> int:
         "metadata_body_bytes": fetcher.body_bytes,
         "metadata_cache_hits": len(fetcher.cache_hits),
         "failures": fetcher.failures,
+        "source_routing": router.coverage(),
+        "source_fallbacks": list(router.fallbacks),
     }
     if args.output:
         write_json(Path(args.output).resolve(), payload)
@@ -1979,6 +2119,8 @@ def parser() -> argparse.ArgumentParser:
     resolver.add_argument("--cache-dir")
     resolver.add_argument("--no-cache", action="store_true")
     resolver.add_argument("--refresh", action="store_true")
+    resolver.add_argument("--mirror-root", help="Override the configured private file-mirror root.")
+    resolver.add_argument("--no-mirror", action="store_true", help="Disable private-mirror fallback.")
     for command in ("preview", "collect"):
         child = subparsers.add_parser(command)
         child.add_argument("--meeting", action="append", required=True, help="Meeting number/date hint, official URL, or local fixture directory; repeatable.")
@@ -1991,6 +2133,8 @@ def parser() -> argparse.ArgumentParser:
         child.add_argument("--cache-dir")
         child.add_argument("--no-cache", action="store_true")
         child.add_argument("--refresh", action="store_true")
+        child.add_argument("--mirror-root", help="Override the configured private file-mirror root.")
+        child.add_argument("--no-mirror", action="store_true", help="Disable private-mirror fallback.")
         if command == "collect":
             child.add_argument("--download", choices=("matched", "metadata"), default="matched")
             child.add_argument("--stage", choices=("core", "complete"), default="complete")
